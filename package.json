@@ -1,5 +1,5 @@
 {
-	"name": "n8n-nodes-<...>",
+	"name": "n8n-nodes-netsuite",
 	"version": "0.1.0",
 	"description": "",
 	"license": "MIT",
@@ -8,12 +8,12 @@
 		"n8n-community-node-package"
 	],
 	"author": {
-		"name": "",
+		"name": "SD",
 		"email": ""
 	},
 	"repository": {
 		"type": "git",
-		"url": "https://github.com/<...>/n8n-nodes-<...>.git"
+		"url": "https://github.com/<...>/n8n-nodes-netsuite.git"
 	},
 	"scripts": {
 		"build": "n8n-node build",
