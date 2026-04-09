@@ -1,28 +1,29 @@
-import { IExecuteFunctions } from 'n8n-workflow';
 import {
 	IDataObject,
 	INodeExecutionData,
 	INodeType,
 	INodeTypeDescription,
 	IHttpRequestOptions,
+	IExecuteFunctions
 } from 'n8n-workflow';
 
 export class NetSuite implements INodeType {
 	description: INodeTypeDescription = {
 		displayName: 'NetSuite Custom',
 		name: 'netSuiteCustom',
-		icon: 'file:netsuite.svg',
+		icon: 'file:../../icons/netsuite.svg',
 		group: ['transform'],
 		version: 1,
 		description: 'Interact with NetSuite REST API',
 		defaults: { name: 'NetSuite Custom' },
 		inputs: ['main'],
 		outputs: ['main'],
+		usableAsTool: true,
 		credentials: [
 			{
-				name: 'netSuiteApi',
+				name: 'netSuiteCustomApi',
 				required: true,
-			},
+			}
 		],
 		properties: [
 			{
@@ -60,7 +61,7 @@ export class NetSuite implements INodeType {
 	async execute(this: IExecuteFunctions): Promise<INodeExecutionData[][]> {
 		const items = this.getInputData();
 		const returnData: INodeExecutionData[] = [];
-		const credentials = await this.getCredentials('netSuiteApi');
+		const credentials = await this.getCredentials('netSuiteApiCredentials');
 
 		for (let i = 0; i < items.length; i++) {
 			try {
@@ -75,9 +76,6 @@ export class NetSuite implements INodeType {
 					method: 'GET',
 					url: `${baseUrl}/${resource}/${recordId}`,
 					// n8n умеет подписывать OAuth1, если передать правильную стратегию
-					authentication: {
-						strategy: 'oauth1',
-					},
 					headers: {
 						'Content-Type': 'application/json',
 					},

@@ -1,9 +1,10 @@
-import { ICredentialType, INodeProperties } from 'n8n-workflow';
+import { ICredentialType, INodeProperties,Icon,ICredentialTestRequest } from 'n8n-workflow';
 
-export class NetSuiteApi implements ICredentialType {
-	name = 'netSuiteApi';
+export class NetSuiteCustomApi implements ICredentialType {
+	name = 'netSuiteCustomApi';
 	displayName = 'NetSuite API';
 	documentationUrl = 'https://docs.oracle.com/en/cloud/saas/netsuite/ns-online-help/section_1544076742.html';
+	icon: Icon = 'file:../icons/netsuite.svg';
 	properties: INodeProperties[] = [
 		{
 			displayName: 'Account ID',
@@ -11,7 +12,7 @@ export class NetSuiteApi implements ICredentialType {
 			type: 'string',
 			default: '',
 			placeholder: '1234567_SB1',
-			description: 'ID вашего аккаунта (включая суффикс Sandbox, если есть). Используйте подчеркивание.',
+			description: 'Your account ID (Includes Suffix if exists). Use underscore instead of dash.',
 		},
 		{
 			displayName: 'Consumer Key',
@@ -42,4 +43,11 @@ export class NetSuiteApi implements ICredentialType {
 			default: '',
 		},
 	];
+		test: ICredentialTestRequest = {
+			request: {
+				baseURL: 'https://api.github.com',
+				url: '/user',
+				method: 'GET',
+			},
+		};
 }
