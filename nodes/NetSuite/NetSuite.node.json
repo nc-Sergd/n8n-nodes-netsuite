@@ -1,0 +1,21 @@
+{
+	"node": "n8n-nodes-netsuite",
+	"nodeVersion": "1.0",
+	"codexVersion": "1.0",
+	"categories": [
+		"ERP",
+		"NetSuite"
+	],
+	"resources": {
+		"credentialDocumentation": [
+			{
+				"url": "https://docs.oracle.com/en/cloud/saas/netsuite/ns-online-help/chapter_1540391670.html"
+			}
+		],
+		"primaryDocumentation": [
+			{
+				"url": "https://docs.oracle.com/en/cloud/saas/netsuite/ns-online-help/section_1544076742.html"
+			}
+		]
+	}
+}

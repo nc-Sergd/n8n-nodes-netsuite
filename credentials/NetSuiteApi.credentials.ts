@@ -1,9 +1,9 @@
-import { ICredentialType, INodeProperties,Icon,ICredentialTestRequest } from 'n8n-workflow';
+import { ICredentialType, INodeProperties, Icon } from 'n8n-workflow'; // , ICredentialTestRequest
 
-export class NetSuiteCustomApi implements ICredentialType {
-	name = 'netSuiteCustomApi';
+export class NetSuiteApi implements ICredentialType {
+	name = 'netSuiteApi';
 	displayName = 'NetSuite API';
-	documentationUrl = 'https://docs.oracle.com/en/cloud/saas/netsuite/ns-online-help/section_1544076742.html';
+	documentationUrl = 'https://docs.oracle.com/en/cloud/saas/netsuite/ns-online-help/section_4636903496.html';
 	icon: Icon = 'file:../icons/netsuite.svg';
 	properties: INodeProperties[] = [
 		{
@@ -43,11 +43,11 @@ export class NetSuiteCustomApi implements ICredentialType {
 			default: '',
 		},
 	];
-		test: ICredentialTestRequest = {
-			request: {
-				baseURL: 'https://api.github.com',
-				url: '/user',
-				method: 'GET',
-			},
-		};
+	// test: ICredentialTestRequest = {
+	// 	request: {
+	// 		baseURL: 'https://${accountUrlPart}.suitetalk.api.netsuite.com',
+	// 		url: '/services/rest/system/v1/serverTime',
+	// 		method: 'GET',
+	// 	},
+	// };
 }

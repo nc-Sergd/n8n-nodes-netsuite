@@ -31,10 +31,10 @@
 		"n8nNodesApiVersion": 1,
 		"strict": true,
 		"credentials": [
-			"dist/credentials/NetSuiteCustomApi.credentials.ts"
+			"dist/credentials/NetSuiteApi.credentials.ts"
 		],
 		"nodes": [
-			"dist/nodes/NetSuite/NetSuiteCustom.node.js"
+			"dist/nodes/NetSuite/NetSuite.node.js"
 		]
 	},
 	"devDependencies": {

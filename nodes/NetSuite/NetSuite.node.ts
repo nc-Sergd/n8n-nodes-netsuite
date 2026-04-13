@@ -9,19 +9,19 @@ import {
 
 export class NetSuite implements INodeType {
 	description: INodeTypeDescription = {
-		displayName: 'NetSuite Custom',
-		name: 'netSuiteCustom',
+		displayName: 'NetSuite',
+		name: 'netSuite',
 		icon: 'file:../../icons/netsuite.svg',
 		group: ['transform'],
 		version: 1,
 		description: 'Interact with NetSuite REST API',
-		defaults: { name: 'NetSuite Custom' },
+		defaults: { name: 'NetSuite' },
 		inputs: ['main'],
 		outputs: ['main'],
 		usableAsTool: true,
 		credentials: [
 			{
-				name: 'netSuiteCustomApi',
+				name: 'netSuiteApi',
 				required: true,
 			}
 		],
@@ -61,7 +61,7 @@ export class NetSuite implements INodeType {
 	async execute(this: IExecuteFunctions): Promise<INodeExecutionData[][]> {
 		const items = this.getInputData();
 		const returnData: INodeExecutionData[] = [];
-		const credentials = await this.getCredentials('netSuiteApiCredentials');
+		const credentials = await this.getCredentials('netSuiteApi');
 
 		for (let i = 0; i < items.length; i++) {
 			try {
