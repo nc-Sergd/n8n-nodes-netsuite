@@ -2,15 +2,17 @@ import { ICredentialType, INodeProperties, Icon } from 'n8n-workflow'; // , ICre
 
 export class NetSuiteApi implements ICredentialType {
 	name = 'netSuiteApi';
+	// extends = ['oAuth1Api'];
 	displayName = 'NetSuite API';
 	documentationUrl = 'https://docs.oracle.com/en/cloud/saas/netsuite/ns-online-help/section_4636903496.html';
 	icon: Icon = 'file:../icons/netsuite.svg';
 	properties: INodeProperties[] = [
 		{
 			displayName: 'Account ID',
-			name: 'account',
+			name: 'realm',
 			type: 'string',
 			default: '',
+			required: true,
 			placeholder: '1234567_SB1',
 			description: 'Your account ID (Includes Suffix if exists). Use underscore instead of dash.',
 		},
@@ -29,8 +31,8 @@ export class NetSuiteApi implements ICredentialType {
 			default: '',
 		},
 		{
-			displayName: 'Token ID',
-			name: 'tokenId',
+			displayName: 'Access token',
+			name: 'token',
 			type: 'string',
 			typeOptions: { password: true },
 			default: '',

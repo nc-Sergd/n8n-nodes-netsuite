@@ -6,6 +6,49 @@ import {
 	IHttpRequestOptions,
 	IExecuteFunctions
 } from 'n8n-workflow';
+import * as crypto from 'crypto';
+
+function percentEncode(str: string): string {
+	return encodeURIComponent(str).replace(/[!'()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
+}
+
+function generateNetSuiteOAuthHeader(
+	method: string,
+	url: string,
+	credentials: { realm: string; consumerKey: string; consumerSecret: string; token: string; tokenSecret: string },
+) {
+	const timestamp = Math.floor(Date.now() / 1000).toString();
+	const nonce = crypto.randomBytes(11).toString('hex');
+
+	const oauthParams: Record<string, string> = {
+		oauth_consumer_key: credentials.consumerKey,
+		oauth_nonce: nonce,
+		oauth_signature_method: 'HMAC-SHA256',
+		oauth_timestamp: timestamp,
+		oauth_token: credentials.token,
+		oauth_version: '1.0',
+	};
+
+	const sortedKeys = Object.keys(oauthParams).sort();
+	const parameterString = sortedKeys
+		.map((key) => `${percentEncode(key)}=${percentEncode(oauthParams[key])}`)
+		.join('&');
+
+	const signatureBaseString = `${method.toUpperCase()}&${percentEncode(url)}&${percentEncode(parameterString)}`;
+	const signingKey = `${percentEncode(credentials.consumerSecret)}&${percentEncode(credentials.tokenSecret)}`;
+	const signature = crypto.createHmac('sha256', signingKey).update(signatureBaseString).digest('base64');
+
+	let authHeader = `OAuth realm="${credentials.realm}",`;
+	authHeader += `oauth_consumer_key="${percentEncode(credentials.consumerKey)}",`;
+	authHeader += `oauth_token="${percentEncode(credentials.token)}",`;
+	authHeader += `oauth_signature_method="HMAC-SHA256",`;
+	authHeader += `oauth_timestamp="${timestamp}",`;
+	authHeader += `oauth_nonce="${nonce}",`;
+	authHeader += `oauth_version="1.0",`;
+	authHeader += `oauth_signature="${percentEncode(signature)}"`;
+
+	return authHeader;
+}
 
 export class NetSuite implements INodeType {
 	description: INodeTypeDescription = {
@@ -68,16 +111,27 @@ export class NetSuite implements INodeType {
 				const resource = this.getNodeParameter('resource', i) as string;
 				const recordId = this.getNodeParameter('id', i) as string;
 
-				// Форматируем ID аккаунта для URL (заменяем _ на - и в нижний регистр)
-				const accountUrlPart = credentials.account.toString().toLowerCase().replace('_', '-');
+				const realm = credentials.realm as string;
+				if (!realm) {
+					throw new Error('NetSuite Account ID (realm) is missing in credentials. Please fill it out in the node credentials.');
+				}
+
+				// Форматируем ID аккаунта для URL (заменяем все _ на - и в нижний регистр)
+				const accountUrlPart = realm.toLowerCase().replace(/_/g, '-');
 				const baseUrl = `https://${accountUrlPart}.suitetalk.api.netsuite.com/services/rest/record/v1`;
 
+				const url = `${baseUrl}/${resource}/${recordId}`;
+				const method = 'GET';
+				const authHeader = generateNetSuiteOAuthHeader(method, url, credentials as any);
+				console.log('--- NetSuite OAuth Header ---');
+				console.log(authHeader);
+
 				const options: IHttpRequestOptions = {
-					method: 'GET',
-					url: `${baseUrl}/${resource}/${recordId}`,
-					// n8n умеет подписывать OAuth1, если передать правильную стратегию
+					method,
+					url,
 					headers: {
 						'Content-Type': 'application/json',
+						'Authorization': authHeader,
 					},
 				};
 
