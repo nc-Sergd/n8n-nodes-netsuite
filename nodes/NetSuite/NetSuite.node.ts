@@ -4,7 +4,8 @@ import {
 	INodeType,
 	INodeTypeDescription,
 	IHttpRequestOptions,
-	IExecuteFunctions
+	IExecuteFunctions,
+	IHttpRequestMethods
 } from 'n8n-workflow';
 import * as crypto from 'crypto';
 
@@ -15,7 +16,7 @@ function percentEncode(str: string): string {
 function generateNetSuiteOAuthHeader(
 	method: string,
 	url: string,
-	credentials: { realm: string; consumerKey: string; consumerSecret: string; token: string; tokenSecret: string },
+	credentials: { realm: string; consumerKey: string; consumerSecret: string; token: string; tokenSecret: string, signatureMethod: string },
 ) {
 	const timestamp = Math.floor(Date.now() / 1000).toString();
 	const nonce = crypto.randomBytes(11).toString('hex');
@@ -23,7 +24,7 @@ function generateNetSuiteOAuthHeader(
 	const oauthParams: Record<string, string> = {
 		oauth_consumer_key: credentials.consumerKey,
 		oauth_nonce: nonce,
-		oauth_signature_method: 'HMAC-SHA256',
+		oauth_signature_method: credentials.signatureMethod,
 		oauth_timestamp: timestamp,
 		oauth_token: credentials.token,
 		oauth_version: '1.0',
@@ -41,7 +42,7 @@ function generateNetSuiteOAuthHeader(
 	let authHeader = `OAuth realm="${credentials.realm}",`;
 	authHeader += `oauth_consumer_key="${percentEncode(credentials.consumerKey)}",`;
 	authHeader += `oauth_token="${percentEncode(credentials.token)}",`;
-	authHeader += `oauth_signature_method="HMAC-SHA256",`;
+	authHeader += `oauth_signature_method="${credentials.signatureMethod}",`;
 	authHeader += `oauth_timestamp="${timestamp}",`;
 	authHeader += `oauth_nonce="${nonce}",`;
 	authHeader += `oauth_version="1.0",`;
@@ -87,6 +88,8 @@ export class NetSuite implements INodeType {
 				noDataExpression: true,
 				options: [
 					{ name: 'Get', value: 'get' },
+					{ name: 'Create', value: 'create' },
+					{ name: 'Update', value: 'update' },
 				],
 				default: 'get',
 			},
@@ -96,7 +99,24 @@ export class NetSuite implements INodeType {
 				type: 'string',
 				default: '',
 				required: true,
-				displayOptions: { show: { operation: ['get'] } },
+				displayOptions: { show: { operation: ['get', 'update'] } },
+			},
+			{
+				displayName: 'JSON Parameters',
+				name: 'jsonParameters',
+				type: 'boolean',
+				default: true,
+				description: 'Whether the body should be provided as JSON string',
+				displayOptions: { show: { operation: ['create', 'update'] } },
+			},
+			{
+				displayName: 'Body (JSON)',
+				name: 'bodyJson',
+				type: 'json',
+				default: '{}',
+				description: 'The JSON body to send',
+				required: true,
+				displayOptions: { show: { operation: ['create', 'update'], jsonParameters: [true] } },
 			},
 		],
 	};
@@ -108,8 +128,13 @@ export class NetSuite implements INodeType {
 
 		for (let i = 0; i < items.length; i++) {
 			try {
+				const operation = this.getNodeParameter('operation', i) as string;
 				const resource = this.getNodeParameter('resource', i) as string;
-				const recordId = this.getNodeParameter('id', i) as string;
+
+				let recordId = '';
+				if (operation === 'get' || operation === 'update') {
+					recordId = this.getNodeParameter('id', i) as string;
+				}
 
 				const realm = credentials.realm as string;
 				if (!realm) {
@@ -120,11 +145,25 @@ export class NetSuite implements INodeType {
 				const accountUrlPart = realm.toLowerCase().replace(/_/g, '-');
 				const baseUrl = `https://${accountUrlPart}.suitetalk.api.netsuite.com/services/rest/record/v1`;
 
-				const url = `${baseUrl}/${resource}/${recordId}`;
-				const method = 'GET';
+				let url = `${baseUrl}/${resource}`;
+				let method: IHttpRequestMethods = 'GET';
+				let body: IDataObject = {};
+
+				if (operation === 'get') {
+					method = 'GET';
+					url = `${url}/${recordId}`;
+				} else if (operation === 'create') {
+					method = 'POST';
+					const bodyJson = this.getNodeParameter('bodyJson', i) as string;
+					body = typeof bodyJson === 'string' ? JSON.parse(bodyJson) : bodyJson;
+				} else if (operation === 'update') {
+					method = 'PATCH';
+					url = `${url}/${recordId}`;
+					const bodyJson = this.getNodeParameter('bodyJson', i) as string;
+					body = typeof bodyJson === 'string' ? JSON.parse(bodyJson) : bodyJson;
+				}
+
 				const authHeader = generateNetSuiteOAuthHeader(method, url, credentials as any);
-				console.log('--- NetSuite OAuth Header ---');
-				console.log(authHeader);
 
 				const options: IHttpRequestOptions = {
 					method,
@@ -133,12 +172,14 @@ export class NetSuite implements INodeType {
 						'Content-Type': 'application/json',
 						'Authorization': authHeader,
 					},
+					body,
+					json: true,
 				};
 
 				// Важно: n8n автоматически использует данные из credentials 'netSuiteApi'
 				// если они настроены в описании ноды.
-				const responseData = await this.helpers.httpRequest.call(this, options);
-				returnData.push({ json: responseData as IDataObject });
+				const responseData = await this.helpers.httpRequest.call(this, options) || { success: true };
+				returnData.push({ json: (typeof responseData === 'string' ? { data: responseData } : responseData) as IDataObject });
 			} catch (error) {
 				if (this.continueOnFail()) {
 					returnData.push({ json: { error: error.message } });

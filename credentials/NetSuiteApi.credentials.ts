@@ -20,6 +20,7 @@ export class NetSuiteApi implements ICredentialType {
 			displayName: 'Consumer Key',
 			name: 'consumerKey',
 			type: 'string',
+			required: true,
 			typeOptions: { password: true },
 			default: '',
 		},
@@ -27,6 +28,7 @@ export class NetSuiteApi implements ICredentialType {
 			displayName: 'Consumer Secret',
 			name: 'consumerSecret',
 			type: 'string',
+			required: true,
 			typeOptions: { password: true },
 			default: '',
 		},
@@ -34,6 +36,7 @@ export class NetSuiteApi implements ICredentialType {
 			displayName: 'Access token',
 			name: 'token',
 			type: 'string',
+			required: true,
 			typeOptions: { password: true },
 			default: '',
 		},
@@ -44,6 +47,16 @@ export class NetSuiteApi implements ICredentialType {
 			typeOptions: { password: true },
 			default: '',
 		},
+		{
+			displayName: 'Signature Method',
+			name: 'signatureMethod',
+			type: 'string',
+			default: "HMAC-SHA256",
+			description: 'The signature method to use for OAuth 1.0a authentication. Must be HMAC-SHA256 for NetSuite API.',
+			options: [
+				{ name: 'HMAC-SHA256', value: 'HMAC-SHA256' }
+			]
+		}
 	];
 	// test: ICredentialTestRequest = {
 	// 	request: {
