@@ -1,2 +1,6 @@
 dist
 node_modules
+
+# Certificates and private keys. This package is published, so a stray `git add .`
+# must not put a key into history — it cannot be taken back out.
+*.pem
