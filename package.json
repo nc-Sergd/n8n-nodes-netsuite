@@ -31,7 +31,8 @@
 		"n8nNodesApiVersion": 1,
 		"strict": true,
 		"credentials": [
-			"dist/credentials/NetSuiteApi.credentials.ts"
+			"dist/credentials/NetSuiteApi.credentials.js",
+			"dist/credentials/NetSuiteOAuth2Api.credentials.js"
 		],
 		"nodes": [
 			"dist/nodes/NetSuite/NetSuite.node.js"

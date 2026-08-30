@@ -13,7 +13,7 @@ function percentEncode(str: string): string {
 	return encodeURIComponent(str).replace(/[!'()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
 }
 
-function generateNetSuiteOAuthHeader(
+export function generateNetSuiteOAuthHeader(
 	method: string,
 	url: string,
 	credentials: { realm: string; consumerKey: string; consumerSecret: string; token: string; tokenSecret: string, signatureMethod: string },
@@ -30,12 +30,28 @@ function generateNetSuiteOAuthHeader(
 		oauth_version: '1.0',
 	};
 
-	const sortedKeys = Object.keys(oauthParams).sort();
-	const parameterString = sortedKeys
-		.map((key) => `${percentEncode(key)}=${percentEncode(oauthParams[key])}`)
+	const parsed = new URL(url);
+
+	// RFC 5849 §3.4.1.2: в base string URI не входит query — только схема, хост и путь.
+	// Схема и хост приводятся к нижнему регистру, порт по умолчанию опускается.
+	const baseUri = `${parsed.protocol.toLowerCase()}//${parsed.host.toLowerCase()}${parsed.pathname}`;
+
+	// §3.4.1.3.1: параметры запроса подписываются вместе с oauth_*. NetSuite пересобирает
+	// base string у себя, поэтому пропуск query даёт INVALID_LOGIN_ATTEMPT — при этом
+	// заголовок Authorization выглядит корректным и причину по нему не видно.
+	// Тело не добавляем: оно у нас всегда JSON, а §3.4.1.3.1 требует учитывать
+	// только application/x-www-form-urlencoded.
+	const params: Array<[string, string]> = Object.entries(oauthParams);
+	parsed.searchParams.forEach((value, key) => params.push([key, value]));
+
+	// §3.4.1.3.2: сортировка по закодированному ключу, при совпадении — по значению.
+	const parameterString = params
+		.map(([key, value]): [string, string] => [percentEncode(key), percentEncode(value)])
+		.sort((a, b) => (a[0] !== b[0] ? (a[0] < b[0] ? -1 : 1) : a[1] < b[1] ? -1 : a[1] > b[1] ? 1 : 0))
+		.map(([key, value]) => `${key}=${value}`)
 		.join('&');
 
-	const signatureBaseString = `${method.toUpperCase()}&${percentEncode(url)}&${percentEncode(parameterString)}`;
+	const signatureBaseString = `${method.toUpperCase()}&${percentEncode(baseUri)}&${percentEncode(parameterString)}`;
 	const signingKey = `${percentEncode(credentials.consumerSecret)}&${percentEncode(credentials.tokenSecret)}`;
 	const signature = crypto.createHmac('sha256', signingKey).update(signatureBaseString).digest('base64');
 
@@ -67,9 +83,26 @@ export class NetSuite implements INodeType {
 			{
 				name: 'netSuiteApi',
 				required: true,
+				displayOptions: { show: { authentication: ['tba'] } },
+			},
+			{
+				name: 'netSuiteOAuth2Api',
+				required: true,
+				displayOptions: { show: { authentication: ['oAuth2'] } },
 			}
 		],
 		properties: [
+			{
+				displayName: 'Authentication',
+				name: 'authentication',
+				type: 'options',
+				noDataExpression: true,
+				options: [
+					{ name: 'OAuth 2.0 (Client Credentials)', value: 'oAuth2' },
+					{ name: 'Token-Based Authentication (OAuth 1.0a)', value: 'tba' },
+				],
+				default: 'oAuth2',
+			},
 			{
 				displayName: 'Resource',
 				name: 'resource',
@@ -124,7 +157,20 @@ export class NetSuite implements INodeType {
 	async execute(this: IExecuteFunctions): Promise<INodeExecutionData[][]> {
 		const items = this.getInputData();
 		const returnData: INodeExecutionData[] = [];
-		const credentials = await this.getCredentials('netSuiteApi');
+
+		const authentication = this.getNodeParameter('authentication', 0, 'oAuth2') as 'oAuth2' | 'tba';
+		const credentialName = authentication === 'tba' ? 'netSuiteApi' : 'netSuiteOAuth2Api';
+		const credentials = await this.getCredentials(credentialName);
+
+		// TBA calls it "realm", OAuth 2.0 calls it "accountId" — same value.
+		const accountId = (authentication === 'tba' ? credentials.realm : credentials.accountId) as string;
+		if (!accountId) {
+			throw new Error('NetSuite Account ID is missing in credentials. Please fill it out in the node credentials.');
+		}
+
+		// Форматируем ID аккаунта для URL (заменяем все _ на - и в нижний регистр)
+		const accountUrlPart = accountId.trim().toLowerCase().replace(/_/g, '-');
+		const baseUrl = `https://${accountUrlPart}.suitetalk.api.netsuite.com/services/rest/record/v1`;
 
 		for (let i = 0; i < items.length; i++) {
 			try {
@@ -135,15 +181,6 @@ export class NetSuite implements INodeType {
 				if (operation === 'get' || operation === 'update') {
 					recordId = this.getNodeParameter('id', i) as string;
 				}
-
-				const realm = credentials.realm as string;
-				if (!realm) {
-					throw new Error('NetSuite Account ID (realm) is missing in credentials. Please fill it out in the node credentials.');
-				}
-
-				// Форматируем ID аккаунта для URL (заменяем все _ на - и в нижний регистр)
-				const accountUrlPart = realm.toLowerCase().replace(/_/g, '-');
-				const baseUrl = `https://${accountUrlPart}.suitetalk.api.netsuite.com/services/rest/record/v1`;
 
 				let url = `${baseUrl}/${resource}`;
 				let method: IHttpRequestMethods = 'GET';
@@ -163,22 +200,27 @@ export class NetSuite implements INodeType {
 					body = typeof bodyJson === 'string' ? JSON.parse(bodyJson) : bodyJson;
 				}
 
-				const authHeader = generateNetSuiteOAuthHeader(method, url, credentials as any);
-
 				const options: IHttpRequestOptions = {
 					method,
 					url,
 					headers: {
 						'Content-Type': 'application/json',
-						'Authorization': authHeader,
 					},
-					body,
+					// NetSuite отклоняет GET с телом — отправляем body только там, где он есть.
+					...(method === 'GET' ? {} : { body }),
 					json: true,
 				};
 
-				// Важно: n8n автоматически использует данные из credentials 'netSuiteApi'
-				// если они настроены в описании ноды.
-				const responseData = await this.helpers.httpRequest.call(this, options) || { success: true };
+				let responseData;
+				if (authentication === 'tba') {
+					// OAuth 1.0a: каждый запрос подписывается локально.
+					options.headers!['Authorization'] = generateNetSuiteOAuthHeader(method, url, credentials as any);
+					responseData = await this.helpers.httpRequest.call(this, options);
+				} else {
+					// OAuth 2.0: n8n сам добавит Bearer из credential и обновит токен по 401.
+					responseData = await this.helpers.httpRequestWithAuthentication.call(this, 'netSuiteOAuth2Api', options);
+				}
+				responseData = responseData || { success: true };
 				returnData.push({ json: (typeof responseData === 'string' ? { data: responseData } : responseData) as IDataObject });
 			} catch (error) {
 				if (this.continueOnFail()) {

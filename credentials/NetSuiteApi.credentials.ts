@@ -50,8 +50,10 @@ export class NetSuiteApi implements ICredentialType {
 		{
 			displayName: 'Signature Method',
 			name: 'signatureMethod',
-			type: 'string',
-			default: "HMAC-SHA256",
+			// Must stay 'options': the value is echoed into oauth_signature_method while the
+			// HMAC is always SHA-256, so a free-text field lets the two silently disagree.
+			type: 'options',
+			default: 'HMAC-SHA256',
 			description: 'The signature method to use for OAuth 1.0a authentication. Must be HMAC-SHA256 for NetSuite API.',
 			options: [
 				{ name: 'HMAC-SHA256', value: 'HMAC-SHA256' }
