@@ -133,7 +133,34 @@ openssl req -new -x509 -newkey ec -pkeyopt ec_paramgen_curve:secp521r1 \
   `preAuthentication` + `expirable`, `Test connection` against `metadata-catalog`.
 - `NetSuite` node — `Authentication` selector (OAuth 2.0 default / TBA), OAuth 2.0 requests
   routed through `httpRequestWithAuthentication`, baseUrl hoisted out of the item loop,
-  no body on GET.
+  no body on GET or DELETE.
+- TBA signature brought in line with RFC 5849 §3.4.1 (section 6).
+- **Record CRUD** — `get`, `create`, `update` (PATCH), `upsert` (PUT `/{type}/eid:{externalId}`)
+  and `delete`, over a curated dropdown of 23 record types plus `Other` for a hand-typed
+  resource name. Bodies are raw JSON.
+
+  POST/PATCH/PUT/DELETE answer with an empty `204` and put the internal ID of the affected
+  record in the `Location` header, so requests go out with `returnFullResponse` and the ID is
+  parsed out of it — otherwise an upsert tells the next node nothing about what it just wrote.
+  Output is the response body when there is one, `{ success: true, id }` when there is not.
+
+### Design decisions behind the node's shape
+
+Worth recording, because each of these was a fork with a plausible alternative:
+
+- **The record-type list is curated and hardcoded, not pulled from `metadata-catalog`.**
+  A dropdown is what makes the node feel like an n8n building block, but a metadata-driven one
+  needs valid credentials at design time, adds latency to opening the node, and produces a list
+  of hundreds of entries. The `Other` option keeps custom records (`customrecord_*`) and
+  anything omitted reachable. The cost is that the list needs manual upkeep.
+- **`getAll` was deliberately left out for now.** The obvious implementation — `GET
+  /record/v1/{type}` — returns only ids and links, no field values, so a "Get Many Customers"
+  built on it hands back a thousand ids and looks broken. Getting the fields means one request
+  per id, which walks straight into the account-wide concurrency limit. It should be backed by
+  SuiteQL instead, which is why it waits for Phase 2 item 2.
+- **Bodies stay raw JSON** rather than a generated field-by-field UI. JSON covers sublists —
+  invoice lines, addresses — which a flat field builder cannot, and it needs no metadata. A
+  friendlier builder can be layered on later without changing the wire format.
 
 ### Phase 1 — shared transport
 
@@ -152,10 +179,8 @@ free to land on either auth path.
 
 ### Phase 2 — a genuinely useful node
 
-1. **Record (generic CRUD)** — any record type, not the hardcoded Customer/Invoice.
-   Operations: `get`, `getAll` (paginated), `create`, `update` (PATCH),
-   **`upsert` (PUT `/{type}/eid:{externalId}`)**, `delete`. Upsert by externalId is the
-   defence against duplicates on retry and should not be treated as optional.
+1. ~~**Record (generic CRUD)**~~ — done, see above. What remains of this item is `getAll`,
+   which is folded into the SuiteQL work below rather than built on the record endpoint.
 2. **SuiteQL** — `POST /query/v1/suiteql` with the `Prefer: transient` header, paginated.
    The main read path; the record list endpoint returns only ids and links, no field values.
 3. **Metadata / loadOptions** — `/record/v1/metadata-catalog` with `Accept:
@@ -215,13 +240,19 @@ Not yet verified **against NetSuite itself** — no operation sends a query stri
 there is nothing to run. The first live proof will come with `getAll`. If that fails with
 `INVALID_LOGIN_ATTEMPT`, the base string is the place to look.
 
-Still unconfirmed, and only observable after a token actually ages out:
+### What is and is not tested live
 
-- whether n8n's `httpRequest` serialises the form-urlencoded token body as expected inside
-  `preAuthentication`;
-- whether the `expirable` flag actually triggers a token refresh on 401.
+| Area | Status |
+| --- | --- |
+| TBA auth, `get` by ID | live (executions 14, 15) |
+| OAuth 2.0 auth, `get` by ID | live (executions 16, 17) |
+| Curated record-type list — `get` on a second type | live, contact 2231 (execution 18) |
+| TBA signature over query parameters | RFC-verified only; nothing sends a query string yet |
+| `create`, `update`, `upsert`, `delete` | **not run against NetSuite yet** |
+| `Location`-header ID extraction | **not run yet** — needs a 204 response to parse |
+| `expirable` token refresh on 401 | not run; only observable after a token ages out (1 h) |
 
-Expected first-run outcome while the role is still broken: the token is issued, then the API
-call fails with `INVALID_LOGIN` — the same 401 as the prototype. That result would confirm the
-port is correct and the problem remains account-side. A failure *at the token step* instead
-would point at the JWT signing code in this repo.
+The write operations and the `Location` parsing are the notable gap. They also carry the one
+regression risk in the current code: switching to `returnFullResponse` changed how *every*
+response is unwrapped, `get` included, so `get` is worth re-running first after any build that
+touches that path.

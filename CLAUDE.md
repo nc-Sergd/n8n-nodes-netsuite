@@ -71,6 +71,28 @@ browser tab instead (Chrome with `--remote-debugging-port=9222`, then `Runtime.e
 over CDP). Confirming the credential name appears in `/types/credentials.json` is the reliable
 check that registration worked.
 
+### Inspecting what actually ran — read the SQLite database
+
+The most dependable way to check a manual test, and the one to reach for first. n8n's `/rest`
+API rejects requests made from a CDP-driven tab (401 even with the `browser-id` header from
+`localStorage`), but the database is right there and needs no auth. Node 24 has `node:sqlite`
+built in, so no dependency is needed — open `~/.n8n/database.sqlite` **read-only**, the running
+server holds it open:
+
+```js
+import { DatabaseSync } from 'node:sqlite';
+const db = new DatabaseSync(dbPath, { readOnly: true });
+db.prepare('SELECT id, name, nodes FROM workflow_entity').all();      // node params + credential ids
+db.prepare('SELECT id, type FROM credentials_entity').all();          // which credentials exist
+db.prepare(`SELECT e.id, e.status, d.data FROM execution_entity e
+  JOIN execution_data d ON d.executionId = e.id ORDER BY e.id DESC`).all();
+```
+
+`execution_data.data` is a flattened structure with string back-references rather than plain
+nested JSON, so substring-search it for markers (`"custentity`, a field name, `"message":"`)
+instead of trying to walk it. Credential *values* are encrypted; types, names and node
+parameters are not, which is enough to tell which auth path a run actually used.
+
 ## Environment
 
 - **Node.js 24** (24.16.0 in use). `@n8n/node-cli` requires 22+.
@@ -118,5 +140,8 @@ signature bug (see Gotchas) is now the one thing standing between the TBA path a
 All account setup and verification happens in `TSTDRV1204919`. The older `8129406_SB1` values
 in `ns_integration\.env` are dead — M2M setup does not transfer between accounts.
 
-Next up is the transport layer and real operations (generic record CRUD with upsert, SuiteQL,
-metadata-driven dropdowns) — see the roadmap in the notes doc.
+The node covers full CRUD — get, create, update, upsert by external ID, delete — over a
+curated list of 23 record types plus an `Other` escape hatch for anything else, custom records
+included. Bodies are raw JSON. Live-tested so far: `get` on customer and contact.
+
+Next up is the transport layer and SuiteQL — see the roadmap in the notes doc.
