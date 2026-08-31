@@ -143,6 +143,19 @@ openssl req -new -x509 -newkey ec -pkeyopt ec_paramgen_curve:secp521r1 \
   record in the `Location` header, so requests go out with `returnFullResponse` and the ID is
   parsed out of it — otherwise an upsert tells the next node nothing about what it just wrote.
   Output is the response body when there is one, `{ success: true, id }` when there is not.
+- **Error normalisation** — a failed write comes back as RFC 7807 (`title`, `status`,
+  `o:errorDetails[]`), and the array is where the actual cause lives. Without unwrapping it the
+  node shows `400 - Bad Request` and building a body becomes guesswork, so `extractNetSuiteError`
+  digs the payload out (its position in the thrown object varies by n8n version and by which
+  helper threw) and `describeNetSuiteError` turns it into `errorPath: detail` plus the
+  `o:errorCode` in the description, raised as a `NodeApiError`. Own validation errors are
+  `NodeOperationError` and pass through unwrapped.
+- **`Fields` builder** — `JSON Parameters` used to be a toggle with nothing behind its `false`
+  branch: turning it off hid the body field and silently sent `{}`. It now shows a name/value
+  collection. A dotted name nests (`subsidiary.id` → `{subsidiary:{id}}`), which is how
+  references are written; `true`/`false`/`null` are sent as literals, a value starting with `{`
+  or `[` is parsed as JSON so sublists remain reachable, and everything else stays a string —
+  numbers included, because NetSuite internal IDs are strings and coercing `00123` breaks them.
 
 ### Design decisions behind the node's shape
 
@@ -158,9 +171,12 @@ Worth recording, because each of these was a fork with a plausible alternative:
   built on it hands back a thousand ids and looks broken. Getting the fields means one request
   per id, which walks straight into the account-wide concurrency limit. It should be backed by
   SuiteQL instead, which is why it waits for Phase 2 item 2.
-- **Bodies stay raw JSON** rather than a generated field-by-field UI. JSON covers sublists —
-  invoice lines, addresses — which a flat field builder cannot, and it needs no metadata. A
-  friendlier builder can be layered on later without changing the wire format.
+- **Raw JSON is the default body, the field list is the alternative.** JSON covers sublists —
+  invoice lines, addresses — and needs no metadata, so it stays the default. The name/value
+  list added on top is deliberately dumb: no metadata lookup, no type coercion beyond the three
+  unambiguous literals. Guessing types is what would make it worse than JSON, not better —
+  a field builder that turns `00123` into a number is a trap. Real per-field typing has to wait
+  for metadata (Phase 2 item 3).
 
 ### Phase 1 — shared transport
 
@@ -170,8 +186,8 @@ Currently URL building, auth and the request are inline in `execute()`. Extract 
 - retry with backoff on 429/5xx — NetSuite returns `SSS_REQUEST_LIMIT_EXCEEDED` when the
   account-wide SuiteTalk concurrency limit is hit;
 - a concurrency queue (account-wide limit, not per-workflow);
-- error normalisation into `NodeApiError` — the current `catch` keeps only `error.message`
-  and discards `o:errorDetails[].detail`, which is the useful part;
+- ~~error normalisation into `NodeApiError`~~ — done in the node; move it into the transport
+  as-is when the transport is extracted, rather than rewriting it;
 - generic pagination helper (`limit`/`offset`, `hasMore`, `links.next`; max `limit` is 1000).
 
 The TBA signature already covers query parameters (done — see section 6), so pagination is
@@ -248,11 +264,48 @@ there is nothing to run. The first live proof will come with `getAll`. If that f
 | OAuth 2.0 auth, `get` by ID | live (executions 16, 17) |
 | Curated record-type list — `get` on a second type | live, contact 2231 (execution 18) |
 | TBA signature over query parameters | RFC-verified only; nothing sends a query string yet |
-| `create`, `update`, `upsert`, `delete` | **not run against NetSuite yet** |
-| `Location`-header ID extraction | **not run yet** — needs a 204 response to parse |
+| `get` after the `returnFullResponse` change | live, contact 2231 (execution 19) |
+| `create` | live, contact 3161 (execution 21) |
+| `Location`-header ID extraction | live — `3161` came back from the header, not the body |
+| `o:errorDetails` unwrapping | live (execution 20) — see below |
+| `upsert` by external ID | live (execution 22) — returned the **same** 3161, no duplicate |
+| `Fields` name/value body builder, dotted name | live (execution 23) — same 3161 |
+| `delete` | live (execution 24) |
+| `update` (PATCH) | not run — shares the URL and body path with `upsert` |
 | `expirable` token refresh on 401 | not run; only observable after a token ages out (1 h) |
 
-The write operations and the `Location` parsing are the notable gap. They also carry the one
-regression risk in the current code: switching to `returnFullResponse` changed how *every*
-response is unwrapped, `get` included, so `get` is worth re-running first after any build that
-touches that path.
+Executions 19–24 are the write session, all against contact `3161` with external ID
+`n8n-test-001`, ending with the record deleted. Execution 22 is the one that matters:
+re-running an upsert against an existing external ID returned the same internal ID rather than
+creating a second record, which is the property the whole operation exists for.
+
+`delete` is the one operation whose output proves nothing on its own — there is no `Location`
+header, so the returned `{ success: true, id }` echoes the ID that was typed in. It is the
+absence of a thrown error that means the record is gone: NetSuite answers a delete of a
+non-existent record with a 404, which surfaces as a `NodeApiError`.
+
+`extractNetSuiteError` probes eight positions for the response payload because the wrapper
+differs between n8n versions and between `httpRequest` and `httpRequestWithAuthentication`.
+Execution 20 proves one of them matches on `httpRequestWithAuthentication` under n8n 2.36.8 —
+the node reported `Please enter value(s) for: Subsidiary` with `USER_ERROR` in the description,
+where before it would have shown a bare `400 - Bad Request`. The TBA path has not been
+re-checked; if a live 400 there shows up bare, no probe matched and the fix is to add the
+actual path, not to rewrite the parsing.
+
+Beyond that, the whole surface is also exercised offline against the compiled `dist` with a
+stubbed `IExecuteFunctions` — method, URL, body presence, 204 + `Location`, and each error
+path. That catches wiring mistakes without touching the account, but proves nothing about
+NetSuite itself.
+
+### NetSuite behaviours confirmed while testing writes
+
+- **A reference can be written as a bare scalar.** `"subsidiary": "36"` is accepted just as
+  `{"subsidiary": {"id": "36"}}` is. So the dotted-name nesting in the `Fields` builder is a
+  convenience, not a requirement, and the flat list is more useful than it looked.
+- **`externalId` works as an ordinary body field on `create`.** Setting it there is equivalent
+  to creating the record and is what makes a later `upsert` on that external ID find it. The
+  `upsert` operation is still the right one for idempotent workflows — it is the URL that makes
+  the re-run safe, not the field.
+- **Required fields surface only as a 400.** The first write attempt failed on
+  `Please enter value(s) for: Subsidiary` because the account is OneWorld. Nothing in the node
+  can predict that today; it is the concrete argument for the metadata work in Phase 2 item 3.

@@ -142,6 +142,19 @@ in `ns_integration\.env` are dead — M2M setup does not transfer between accoun
 
 The node covers full CRUD — get, create, update, upsert by external ID, delete — over a
 curated list of 23 record types plus an `Other` escape hatch for anything else, custom records
-included. Bodies are raw JSON. Live-tested so far: `get` on customer and contact.
+included. Bodies are raw JSON by default, or a name/value field list where a dotted name nests
+(`subsidiary.id`). Failed requests are unwrapped from NetSuite's RFC 7807 body so
+`o:errorDetails[].detail` reaches the user instead of `400 - Bad Request`.
+
+Writes are proven live (executions 19–24, contact `3161`, external ID `n8n-test-001`, ending
+with the record deleted): `create`, `upsert` re-run against an existing external ID returning
+the **same** internal ID, `delete`, the `Location`-header ID extraction, the field-list body
+builder, and the `o:errorDetails` unwrapping. `update` is the one operation not run separately
+— it shares its URL and body path with `upsert`. The whole surface is additionally exercised
+offline against `dist` with a stubbed `IExecuteFunctions`, which proves the node's logic and
+nothing about the account — see the "What is and is not tested live" table in the notes doc.
+
+With reads and writes both live, the next module is SuiteQL — it is also what `getAll` will be
+built on. See the roadmap in the notes doc.
 
 Next up is the transport layer and SuiteQL — see the roadmap in the notes doc.

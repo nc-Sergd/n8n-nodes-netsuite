@@ -7,6 +7,8 @@ import {
 	IExecuteFunctions,
 	IHttpRequestMethods,
 	INodePropertyOptions,
+	JsonObject,
+	NodeApiError,
 	NodeOperationError
 } from 'n8n-workflow';
 import * as crypto from 'crypto';
@@ -48,14 +50,135 @@ const RECORD_TYPE_OPTIONS: INodePropertyOptions[] = [
 	{ name: 'Vendor Bill', value: 'vendorBill' },
 ];
 
+/**
+ * «subsidiary.id» превращается в { subsidiary: { id: ... } }. Ссылки в NetSuite —
+ * всегда вложенный объект с id, и без точки их из плоского списка полей не задать.
+ */
+function setByPath(target: IDataObject, path: string[], value: unknown): void {
+	let cursor = target;
+	for (let p = 0; p < path.length - 1; p++) {
+		const key = path[p];
+		if (typeof cursor[key] !== 'object' || cursor[key] === null) {
+			cursor[key] = {};
+		}
+		cursor = cursor[key] as IDataObject;
+	}
+	cursor[path[path.length - 1]] = value as IDataObject[string];
+}
+
+/**
+ * Объекты и массивы в списке полей пишутся JSON-ом — иначе не задать sublist.
+ * true/false/null распознаём: чекбокс строку не примет, а null — единственный способ
+ * очистить поле при update. Числа намеренно оставляем строками: в NetSuite '1' и
+ * '00123' сплошь и рядом ID, и молчаливое приведение к числу их ломает.
+ */
+function parseFieldValue(raw: unknown): unknown {
+	if (typeof raw !== 'string') return raw;
+	const trimmed = raw.trim();
+	if (trimmed === 'true') return true;
+	if (trimmed === 'false') return false;
+	if (trimmed === 'null') return null;
+	if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+		try {
+			return JSON.parse(trimmed);
+		} catch {
+			return raw;
+		}
+	}
+	return raw;
+}
+
+/**
+ * NetSuite отвечает на неудачную запись телом в формате RFC 7807: title/status и
+ * массив o:errorDetails, где и лежит настоящая причина («You must specify companyname»).
+ * n8n без этого показывает только «400 - Bad Request», и подбор body превращается
+ * в угадайку. Обёртка вокруг ошибки зависит от версии n8n и от того, какой helper её
+ * бросил, поэтому payload ищем по нескольким местам, а не по одному.
+ */
+function extractNetSuiteError(error: unknown): IDataObject | undefined {
+	const dig = (root: unknown, ...path: string[]): unknown => {
+		let cursor = root;
+		for (const key of path) {
+			if (!cursor || typeof cursor !== 'object') return undefined;
+			cursor = (cursor as Record<string, unknown>)[key];
+		}
+		return cursor;
+	};
+
+	const candidates = [
+		dig(error, 'response', 'data'),
+		dig(error, 'response', 'body'),
+		dig(error, 'error'),
+		dig(error, 'body'),
+		dig(error, 'cause', 'response', 'data'),
+		dig(error, 'cause', 'response', 'body'),
+		dig(error, 'cause', 'error'),
+		dig(error, 'cause'),
+	];
+
+	for (const candidate of candidates) {
+		let payload: unknown = candidate;
+		if (typeof payload === 'string') {
+			try {
+				payload = JSON.parse(payload);
+			} catch {
+				continue;
+			}
+		}
+		if (payload && typeof payload === 'object' && ('o:errorDetails' in payload || 'title' in payload)) {
+			return payload as IDataObject;
+		}
+	}
+
+	return undefined;
+}
+
+/** Собирает из o:errorDetails человекочитаемое сообщение и код для description. */
+function describeNetSuiteError(payload: IDataObject): { message: string; description?: string } {
+	const details = payload['o:errorDetails'];
+
+	if (Array.isArray(details) && details.length > 0) {
+		const messages = details
+			.map((entry) => {
+				const detail = (entry as IDataObject)?.detail;
+				const path = (entry as IDataObject)?.['o:errorPath'];
+				if (!detail) return '';
+				return path ? `${path}: ${detail}` : String(detail);
+			})
+			.filter(Boolean);
+
+		if (messages.length > 0) {
+			const codes = [
+				...new Set(details.map((entry) => (entry as IDataObject)?.['o:errorCode']).filter(Boolean)),
+			];
+			return {
+				message: messages.join('; '),
+				description: codes.length > 0 ? `NetSuite error code: ${codes.join(', ')}` : undefined,
+			};
+		}
+	}
+
+	const title = payload.title;
+	return { message: typeof title === 'string' && title ? title : 'NetSuite request failed' };
+}
+
 function percentEncode(str: string): string {
 	return encodeURIComponent(str).replace(/[!'()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
+}
+
+export interface NetSuiteTbaCredentials {
+	realm: string;
+	consumerKey: string;
+	consumerSecret: string;
+	token: string;
+	tokenSecret: string;
+	signatureMethod: string;
 }
 
 export function generateNetSuiteOAuthHeader(
 	method: string,
 	url: string,
-	credentials: { realm: string; consumerKey: string; consumerSecret: string; token: string; tokenSecret: string, signatureMethod: string },
+	credentials: NetSuiteTbaCredentials,
 ) {
 	const timestamp = Math.floor(Date.now() / 1000).toString();
 	const nonce = crypto.randomBytes(11).toString('hex');
@@ -214,6 +337,44 @@ export class NetSuite implements INodeType {
 					show: { operation: ['create', 'update', 'upsert'], jsonParameters: [true] },
 				},
 			},
+			{
+				displayName: 'Fields',
+				name: 'fields',
+				type: 'fixedCollection',
+				typeOptions: { multipleValues: true, sortable: true },
+				placeholder: 'Add Field',
+				default: {},
+				description: 'The record fields to write',
+				displayOptions: {
+					show: { operation: ['create', 'update', 'upsert'], jsonParameters: [false] },
+				},
+				options: [
+					{
+						name: 'field',
+						displayName: 'Field',
+						values: [
+							{
+								displayName: 'Name',
+								name: 'name',
+								type: 'string',
+								default: '',
+								required: true,
+								placeholder: 'companyName',
+								description:
+									'The NetSuite field ID. A dotted name builds a nested object, which is how reference fields such as subsidiary are written.',
+							},
+							{
+								displayName: 'Value',
+								name: 'value',
+								type: 'string',
+								default: '',
+								description:
+									'The value to write. Exactly true, false or null is sent as that literal, a value starting with { or [ is parsed as JSON so sublists stay possible, and everything else is sent as a string — including numbers, because NetSuite internal IDs are strings.',
+							},
+						],
+					},
+				],
+			},
 		],
 	};
 
@@ -262,8 +423,28 @@ export class NetSuite implements INodeType {
 				}
 
 				const readBody = (): IDataObject => {
-					const bodyJson = this.getNodeParameter('bodyJson', i) as string;
-					return typeof bodyJson === 'string' ? JSON.parse(bodyJson) : bodyJson;
+					if (this.getNodeParameter('jsonParameters', i, true) as boolean) {
+						const bodyJson = this.getNodeParameter('bodyJson', i) as string;
+						if (typeof bodyJson !== 'string') return bodyJson;
+						try {
+							return JSON.parse(bodyJson);
+						} catch (parseError) {
+							throw new NodeOperationError(this.getNode(), 'Body (JSON) is not valid JSON', {
+								itemIndex: i,
+								description: (parseError as Error).message,
+							});
+						}
+					}
+
+					const collection = this.getNodeParameter('fields', i, {}) as IDataObject;
+					const entries = (collection.field ?? []) as Array<IDataObject>;
+					const built: IDataObject = {};
+					for (const entry of entries) {
+						const name = String(entry?.name ?? '').trim();
+						if (!name) continue;
+						setByPath(built, name.split('.'), parseFieldValue(entry.value));
+					}
+					return built;
 				};
 
 				let url = `${baseUrl}/${recordType}`;
@@ -316,7 +497,11 @@ export class NetSuite implements INodeType {
 				let response;
 				if (authentication === 'tba') {
 					// OAuth 1.0a: каждый запрос подписывается локально.
-					options.headers!['Authorization'] = generateNetSuiteOAuthHeader(method, url, credentials as any);
+					options.headers!['Authorization'] = generateNetSuiteOAuthHeader(
+						method,
+						url,
+						credentials as unknown as NetSuiteTbaCredentials,
+					);
 					response = await this.helpers.httpRequest.call(this, options);
 				} else {
 					// OAuth 2.0: n8n сам добавит Bearer из credential и обновит токен по 401.
@@ -341,13 +526,27 @@ export class NetSuite implements INodeType {
 						json.id = id;
 					}
 				}
-				returnData.push({ json });
+				returnData.push({ json, pairedItem: { item: i } });
 			} catch (error) {
+				// Свои проверки уже сформулированы по-человечески — их не переписываем.
+				const payload = error instanceof NodeOperationError ? undefined : extractNetSuiteError(error);
+				let failure = error;
+				if (payload) {
+					const { message, description } = describeNetSuiteError(payload);
+					const status = payload.status;
+					failure = new NodeApiError(this.getNode(), payload as JsonObject, {
+						message,
+						description,
+						httpCode: status === undefined ? undefined : String(status),
+						itemIndex: i,
+					});
+				}
+
 				if (this.continueOnFail()) {
-					returnData.push({ json: { error: error.message } });
+					returnData.push({ json: { error: failure.message }, pairedItem: { item: i } });
 					continue;
 				}
-				throw error;
+				throw failure;
 			}
 		}
 
