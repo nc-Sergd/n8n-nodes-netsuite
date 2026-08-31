@@ -143,6 +143,13 @@ openssl req -new -x509 -newkey ec -pkeyopt ec_paramgen_curve:secp521r1 \
   record in the `Location` header, so requests go out with `returnFullResponse` and the ID is
   parsed out of it — otherwise an upsert tells the next node nothing about what it just wrote.
   Output is the response body when there is one, `{ success: true, id }` when there is not.
+- **`Get Field Metadata`** — `GET /record/v1/metadata-catalog/{type}`. `Metadata Format`
+  chooses the `Accept` header (`application/schema+json` or `application/swagger+json`), which
+  is what decides whether the endpoint returns the record's schema or the OpenAPI description
+  of its endpoints. With `Simplify` on, the JSON Schema is flattened to one item per field —
+  `name`, `type`, `label`, `description`, plus `referenceKeys` for reference fields, `enum`,
+  `readOnly`, `nullable`, `filterable` and `custom`. What it deliberately does *not* claim is
+  mandatoriness; see below.
 - **Error normalisation** — a failed write comes back as RFC 7807 (`title`, `status`,
   `o:errorDetails[]`), and the array is where the actual cause lives. Without unwrapping it the
   node shows `400 - Bad Request` and building a body becomes guesswork, so `extractNetSuiteError`
@@ -199,9 +206,10 @@ free to land on either auth path.
    which is folded into the SuiteQL work below rather than built on the record endpoint.
 2. **SuiteQL** — `POST /query/v1/suiteql` with the `Prefer: transient` header, paginated.
    The main read path; the record list endpoint returns only ids and links, no field values.
-3. **Metadata / loadOptions** — `/record/v1/metadata-catalog` with `Accept:
-   application/schema+json`, feeding dropdowns of record types and fields. This is what turns
-   the node from "paste JSON" into a normal UI.
+3. **Metadata / loadOptions** — the `Get Field Metadata` operation is done (see above); what
+   remains is feeding it into `loadOptions` so the `Fields` builder offers real field names
+   instead of free text. Note that it cannot mark them mandatory — the catalog does not carry
+   that, see "metadata-catalog does not publish mandatory fields".
 
 ### Phase 3 — triggers and the rest
 
@@ -271,6 +279,9 @@ there is nothing to run. The first live proof will come with `getAll`. If that f
 | `upsert` by external ID | live (execution 22) — returned the **same** 3161, no duplicate |
 | `Fields` name/value body builder, dotted name | live (execution 23) — same 3161 |
 | `delete` | live (execution 24), confirmed by a 404 on re-read (execution 25) |
+| `describe` — JSON Schema, simplified and raw | live (executions 27, 28) — 45 contact fields |
+| `describe` — OpenAPI | live (execution 29) |
+| `Required Fields Only` refusing to guess | live (execution 30) |
 | `update` (PATCH) | not run — shares the URL and body path with `upsert` |
 | `expirable` token refresh on 401 | not run; only observable after a token ages out (1 h) |
 
@@ -310,4 +321,41 @@ NetSuite itself.
   the re-run safe, not the field.
 - **Required fields surface only as a 400.** The first write attempt failed on
   `Please enter value(s) for: Subsidiary` because the account is OneWorld. Nothing in the node
-  can predict that today; it is the concrete argument for the metadata work in Phase 2 item 3.
+  can predict that — see the next section, which is what came of trying.
+
+### metadata-catalog does not publish mandatory fields
+
+Checked against `contact` in TSTDRV1204919, both representations of
+`GET /record/v1/metadata-catalog/{type}`, executions 28 and 29:
+
+| | `Accept: application/schema+json` | `Accept: application/swagger+json` |
+| --- | --- | --- |
+| top-level keys | `type`, `properties`, `$schema`, `x-ns-filterable` | `openapi`, `info`, `servers`, `security`, `paths`, `components` |
+| size | 18 KB | 54 KB |
+| `required` arrays | none | **none anywhere in the document** |
+| references | `type: object` with nested `id`/`refName`/`externalId`/`links` | collapsed to `$ref: nsResource` |
+| sublist element fields | absent — only the collection wrapper | **present**, e.g. `contact-addressBookElement` |
+
+The 54 KB OpenAPI document was walked recursively: zero `required` arrays. The
+`"required": false` occurrences in it are OpenAPI *parameter* declarations for path and query
+parameters, not field mandatoriness. `nullable` is no substitute either — it appears on 24 of
+the 45 contact fields and is `true` in every one of them, so it marks which scalars accept null
+and nothing more. Were it a mandatoriness signal, `isInactive` would read as required and
+`subsidiary` — which we know is mandatory, because a write without it failed — would not.
+
+This is a property of NetSuite, not of the parsing: mandatoriness there is decided by the entry
+form and by which features are enabled, which is form state rather than record metadata, and
+the REST catalog describes the record. So under the no-SuiteScript constraint:
+
+- **custom fields** — their `ismandatory` flag is queryable through SuiteQL
+  (`EntityCustomField`, `TransactionBodyCustomField` and friends). Another reason SuiteQL is
+  the next module;
+- **standard fields** — empirical only, from `o:errorDetails` on a rejected write. That path
+  works and is what produced `Please enter value(s) for: Subsidiary`.
+
+Consequences in the node: `required` is emitted only when the schema actually declares the
+array, so nobody reads a missing answer as "not required"; and `Required Fields Only` raises a
+`NodeOperationError` explaining the gap instead of returning an empty list that looks like a
+bug (execution 30). The `Metadata Format` switch stays, but for a different reason than it was
+added — OpenAPI is the only way to see the fields inside a sublist element, which is exactly
+what composing an `addressBook` or an item line needs.

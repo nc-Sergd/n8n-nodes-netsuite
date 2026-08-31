@@ -154,7 +154,14 @@ builder, and the `o:errorDetails` unwrapping. `update` is the one operation not 
 offline against `dist` with a stubbed `IExecuteFunctions`, which proves the node's logic and
 nothing about the account — see the "What is and is not tested live" table in the notes doc.
 
-With reads and writes both live, the next module is SuiteQL — it is also what `getAll` will be
-built on. See the roadmap in the notes doc.
+A `Get Field Metadata` operation reads `/record/v1/metadata-catalog/{type}` in either
+representation (JSON Schema or OpenAPI, selected by `Accept`) and flattens the schema to one
+item per field. **It cannot tell you which fields are mandatory** — verified against `contact`,
+executions 28 and 29: neither representation carries a `required` array anywhere, and
+`nullable` is `true` wherever it appears. Do not try to derive mandatoriness from this endpoint
+again; the notes doc has the full finding and the two paths that do work.
+
+Next module is SuiteQL — the main read path, what `getAll` will be built on, and the only way
+to reach the `ismandatory` flag of custom fields.
 
 Next up is the transport layer and SuiteQL — see the roadmap in the notes doc.

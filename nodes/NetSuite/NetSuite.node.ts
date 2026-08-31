@@ -89,6 +89,51 @@ function parseFieldValue(raw: unknown): unknown {
 }
 
 /**
+ * Разворачивает JSON Schema из metadata-catalog в плоский список полей.
+ *
+ * Про обязательность — проверено на живой схеме contact (execution 28): её там нет.
+ * У корня только type/properties/$schema/x-ns-filterable, массива `required` не
+ * существует, а `nullable` стоит у 24 полей из 45 и всегда равен true, то есть
+ * признаком мандаторности служить не может. Оно и логично: обязательность в
+ * NetSuite задаётся формой и включёнными фичами (subsidiary обязателен только в
+ * OneWorld), а схема описывает запись, а не форму. Поэтому `required` мы
+ * проставляем ТОЛЬКО если схема действительно объявила массив — иначе ключа не
+ * будет вовсе, чтобы никто не принял отсутствие данных за «поле необязательное».
+ */
+function flattenSchemaFields(schema: IDataObject): IDataObject[] {
+	const properties = (schema.properties ?? {}) as Record<string, IDataObject>;
+	const declared = Array.isArray(schema.required) ? (schema.required as string[]) : undefined;
+	const required = new Set(declared ?? []);
+
+	return Object.entries(properties).map(([name, spec]) => {
+		const field: IDataObject = { name };
+		if (declared) field.required = required.has(name);
+
+		// Ссылка на другую запись выглядит как type: object с вложенным id —
+		// $ref на верхнем уровне NetSuite не использует, он только внутри links.
+		const nested = spec?.properties as Record<string, IDataObject> | undefined;
+		const ref = spec?.$ref;
+		if (spec?.type === 'object' && nested && 'id' in nested) {
+			field.type = 'reference';
+			field.referenceKeys = Object.keys(nested);
+		} else {
+			field.type = spec?.type ?? (ref ? 'reference' : undefined);
+		}
+		if (typeof ref === 'string') field.refersTo = ref.split('/').pop();
+
+		if (spec?.title) field.label = spec.title;
+		if (spec?.description) field.description = spec.description;
+		if (typeof spec?.nullable === 'boolean') field.nullable = spec.nullable;
+		if (spec?.readOnly === true) field.readOnly = true;
+		if (Array.isArray(spec?.enum)) field.enum = spec.enum;
+		if (spec?.['x-ns-filterable'] === true) field.filterable = true;
+		if (spec?.['x-ns-custom-field'] === true) field.custom = true;
+
+		return field;
+	});
+}
+
+/**
  * NetSuite отвечает на неудачную запись телом в формате RFC 7807: title/status и
  * массив o:errorDetails, где и лежит настоящая причина («You must specify companyname»).
  * n8n без этого показывает только «400 - Bad Request», и подбор body превращается
@@ -295,6 +340,7 @@ export class NetSuite implements INodeType {
 					{ name: 'Create or Update', value: 'upsert', action: 'Create or update a record' },
 					{ name: 'Delete', value: 'delete', action: 'Delete a record' },
 					{ name: 'Get', value: 'get', action: 'Get a record' },
+					{ name: 'Get Field Metadata', value: 'describe', action: 'Get field metadata for a record type' },
 					{ name: 'Update', value: 'update', action: 'Update a record' },
 				],
 				default: 'get',
@@ -317,6 +363,39 @@ export class NetSuite implements INodeType {
 				description:
 					'Your own identifier for the record. NetSuite creates the record when nothing carries this external ID yet, and updates the existing one otherwise — so re-running a workflow after a failure will not produce duplicates.',
 				displayOptions: { show: { operation: ['upsert'] } },
+			},
+			{
+				displayName: 'Metadata Format',
+				name: 'metadataFormat',
+				type: 'options',
+				options: [
+					{ name: 'JSON Schema', value: 'schema' },
+					{ name: 'OpenAPI', value: 'openapi' },
+				],
+				default: 'schema',
+				description:
+					'Which representation of the record metadata to fetch. JSON Schema describes the record and its fields; OpenAPI describes the endpoints around it and is returned raw.',
+				displayOptions: { show: { operation: ['describe'] } },
+			},
+			{
+				displayName: 'Simplify',
+				name: 'simplify',
+				type: 'boolean',
+				default: true,
+				description:
+					'Whether to return one item per field instead of the raw JSON Schema. The raw schema is large and deeply nested, so it is only worth reading when the simplified view is missing something.',
+				displayOptions: { show: { operation: ['describe'], metadataFormat: ['schema'] } },
+			},
+			{
+				displayName: 'Required Fields Only',
+				name: 'requiredOnly',
+				type: 'boolean',
+				default: false,
+				description:
+					'Whether to drop every field the schema does not mark as required. Mind that NetSuite decides mandatoriness per form and per enabled feature, so the schema knows about only some of it — a field absent here can still be rejected on write.',
+				displayOptions: {
+					show: { operation: ['describe'], metadataFormat: ['schema'], simplify: [true] },
+				},
 			},
 			{
 				displayName: 'JSON Parameters',
@@ -454,6 +533,9 @@ export class NetSuite implements INodeType {
 				if (operation === 'get') {
 					method = 'GET';
 					url = `${url}/${recordId}`;
+				} else if (operation === 'describe') {
+					method = 'GET';
+					url = `${baseUrl}/metadata-catalog/${recordType}`;
 				} else if (operation === 'create') {
 					method = 'POST';
 					body = readBody();
@@ -484,6 +566,16 @@ export class NetSuite implements INodeType {
 					url,
 					headers: {
 						'Content-Type': 'application/json',
+						// Один и тот же URL отдаёт разные документы в зависимости от Accept:
+						// schema+json — схему самой записи, swagger+json — описание эндпоинтов.
+						...(operation === 'describe'
+							? {
+									Accept:
+										(this.getNodeParameter('metadataFormat', i, 'schema') as string) === 'openapi'
+											? 'application/swagger+json'
+											: 'application/schema+json',
+								}
+							: {}),
 					},
 					// NetSuite отклоняет GET и DELETE с телом — шлём его только там, где он есть.
 					...(method === 'GET' || method === 'DELETE' ? {} : { body }),
@@ -508,8 +600,57 @@ export class NetSuite implements INodeType {
 					response = await this.helpers.httpRequestWithAuthentication.call(this, 'netSuiteOAuth2Api', options);
 				}
 
-				const responseBody = response?.body;
+				let responseBody = response?.body;
 				const responseHeaders = (response?.headers ?? {}) as Record<string, unknown>;
+
+				if (operation === 'describe') {
+					// Content-Type здесь application/schema+json, и n8n такое телом-объектом
+					// не всегда отдаёт — разбираем сами, если пришла строка.
+					if (typeof responseBody === 'string') {
+						try {
+							responseBody = JSON.parse(responseBody);
+						} catch {
+							throw new NodeOperationError(
+								this.getNode(),
+								`NetSuite returned a metadata document that is not JSON for "${recordType}"`,
+								{ itemIndex: i },
+							);
+						}
+					}
+
+					const schema = (responseBody ?? {}) as IDataObject;
+					// OpenAPI-документ устроен иначе (paths/components), полем-на-элемент
+					// его разбирать нечем — отдаём как есть.
+					const isOpenApi =
+						(this.getNodeParameter('metadataFormat', i, 'schema') as string) === 'openapi';
+					if (isOpenApi || !(this.getNodeParameter('simplify', i, true) as boolean)) {
+						returnData.push({ json: schema, pairedItem: { item: i } });
+						continue;
+					}
+
+					const requiredOnly = this.getNodeParameter('requiredOnly', i, false) as boolean;
+					if (requiredOnly && !Array.isArray(schema.required)) {
+						// Молча отдать пустой список тут нельзя: он читается как «обязательных
+						// полей нет», а на деле NetSuite их просто не публикует.
+						throw new NodeOperationError(
+							this.getNode(),
+							`NetSuite does not publish mandatory fields for "${recordType}"`,
+							{
+								itemIndex: i,
+								description:
+									'The metadata schema for this record type carries no "required" list, and its "nullable" flag marks only which scalars accept null, so mandatory fields cannot be derived from it. NetSuite decides mandatoriness per entry form and per enabled feature, which is form state rather than record metadata. Turn this option off to list every field, or attempt the write and read the reason out of the returned error.',
+							},
+						);
+					}
+
+					const fields = flattenSchemaFields(schema).filter(
+						(field) => !requiredOnly || field.required === true,
+					);
+					for (const field of fields) {
+						returnData.push({ json: field, pairedItem: { item: i } });
+					}
+					continue;
+				}
 
 				let json: IDataObject;
 				if (typeof responseBody === 'string' && responseBody.length > 0) {
