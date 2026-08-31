@@ -270,7 +270,7 @@ there is nothing to run. The first live proof will come with `getAll`. If that f
 | `o:errorDetails` unwrapping | live (execution 20) — see below |
 | `upsert` by external ID | live (execution 22) — returned the **same** 3161, no duplicate |
 | `Fields` name/value body builder, dotted name | live (execution 23) — same 3161 |
-| `delete` | live (execution 24) |
+| `delete` | live (execution 24), confirmed by a 404 on re-read (execution 25) |
 | `update` (PATCH) | not run — shares the URL and body path with `upsert` |
 | `expirable` token refresh on 401 | not run; only observable after a token ages out (1 h) |
 
@@ -280,9 +280,11 @@ re-running an upsert against an existing external ID returned the same internal 
 creating a second record, which is the property the whole operation exists for.
 
 `delete` is the one operation whose output proves nothing on its own — there is no `Location`
-header, so the returned `{ success: true, id }` echoes the ID that was typed in. It is the
-absence of a thrown error that means the record is gone: NetSuite answers a delete of a
-non-existent record with a 404, which surfaces as a `NodeApiError`.
+header, so the returned `{ success: true, id }` echoes the ID that was typed in. What proves it
+is the read afterwards: execution 25 re-read `3161` and got `The record instance does not
+exist. Provide a valid record instance ID.` with `NONEXISTENT_ID`. That is also the only 404
+seen so far — every other observed error was a 400 — so the error unwrapping is now known to
+work on both.
 
 `extractNetSuiteError` probes eight positions for the response payload because the wrapper
 differs between n8n versions and between `httpRequest` and `httpRequestWithAuthentication`.
