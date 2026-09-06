@@ -161,6 +161,27 @@ executions 28 and 29: neither representation carries a `required` array anywhere
 `nullable` is `true` wherever it appears. Do not try to derive mandatoriness from this endpoint
 again; the notes doc has the full finding and the two paths that do work.
 
+**An end-to-end example workflow is proven live** — `docs/example-csv-to-netsuite-workflow.json`,
+installed locally as workflow `yaeaVmUzf86HEj1Z` ("Example WF"), executions 50–53. Eleven nodes:
+schedule → read CSV → per row upsert a `customer` and a `salesOrder` → write a log CSV of what
+was created and what was updated. Sample input in `samples/transactions-in.csv`; the copy the
+workflow actually reads lives under `C:/Users/sergeid/Documents/Examples_n8n/`, because n8n
+refuses the repo path with `Access to the file is not allowed.` Section 7 of the notes doc has
+the findings; the ones that cost the most time:
+
+- **`get` takes more than an internal ID.** The Record ID is interpolated raw, so
+  `eid:{externalId}` reads by external ID, and a Record ID of `?limit=20&q=isInactive%20IS%20false`
+  turns the call into a **collection** query returning `items[]` of ids. That probe is how you
+  find a valid internal ID with no `getAll` and no SuiteQL. `customResource` takes an expression,
+  so one node can sweep several record types in a run.
+- **`Invalid Field Value <id> for the following field: item` usually means `isInactive: true`.**
+  The demo account keeps dead items at low internal IDs; the live ones start around `848`. Read
+  the record back before concluding the id is wrong.
+- **n8n strips parameters equal to the node default on save**, so a diff of
+  `workflow_entity.nodes` against the source JSON shows differences that are not drift.
+- **The editor's paste handler is debounced 1000 ms and is swallowed by the changelog/NPS
+  drawers.** Close `.el-drawer__close-btn` first or a pasted workflow silently does not arrive.
+
 Next module is SuiteQL — the main read path, what `getAll` will be built on, and the only way
 to reach the `ismandatory` flag of custom fields.
 

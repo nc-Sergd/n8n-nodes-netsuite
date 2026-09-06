@@ -284,6 +284,12 @@ there is nothing to run. The first live proof will come with `getAll`. If that f
 | `Required Fields Only` refusing to guess | live (execution 30) |
 | `update` (PATCH) | not run — shares the URL and body path with `upsert` |
 | `expirable` token refresh on 401 | not run; only observable after a token ages out (1 h) |
+| `upsert` on a **transaction** (`salesOrder`) | live (executions 49–53) — see section 7 |
+| A **sublist** body (`item.items[]`) | live (executions 49–53) |
+| `get` by `eid:{externalId}` instead of an internal ID | live (executions 47–53) |
+| `get` against a **collection** with `?limit=&q=` | live (execution 44) |
+| `resource: other` with an **expression** in `customResource` | live (executions 32, 42–46) |
+| Eleven-node example workflow, end to end | live (executions 50–53) — see section 7 |
 
 Executions 19–24 are the write session, all against contact `3161` with external ID
 `n8n-test-001`, ending with the record deleted. Execution 22 is the one that matters:
@@ -359,3 +365,117 @@ array, so nobody reads a missing answer as "not required"; and `Required Fields 
 bug (execution 30). The `Metadata Format` switch stays, but for a different reason than it was
 added — OpenAPI is the only way to see the fields inside a sublist element, which is exactly
 what composing an `addressBook` or an item line needs.
+
+## 7. The example workflow — CSV in, records out, CSV log
+
+`docs/example-csv-to-netsuite-workflow.json` is an eleven-node workflow that runs the shape a
+real integration has: on a schedule, read a CSV, upsert a customer and a sales order per row,
+and write a log CSV saying what was created and what was updated. It is installed in the local
+n8n as workflow `yaeaVmUzf86HEj1Z` ("Example WF") and is **proven end to end** — executions 50
+to 53 against `TSTDRV1204919`.
+
+```
+Every Hour → Read Source CSV → Parse CSV → Normalize Row
+  → Find Customer → Upsert Customer
+  → Find Sales Order → Upsert Sales Order
+  → Build Log Row → To CSV → Write Log CSV
+```
+
+Sample input: `samples/transactions-in.csv`. The workflow points at a copy under
+`C:/Users/sergeid/Documents/Examples_n8n/` and writes its log beside it.
+
+### Created vs. updated, without a search
+
+The node has no `getAll`, so "was this record already there?" is answered by a probe: a `get`
+whose Record ID is `eid:{externalId}` rather than an internal ID, with
+`onError: continueRegularOutput`. A record back means the upsert that follows will update; a
+404 means it will create. The log row then reads
+`{{ $('Find Customer').item.json.id ? 'updated' : 'created' }}`.
+
+This costs one extra GET per record per row and is the only honest way to fill that column —
+`PUT /eid:` answers 204 with a `Location` header either way and never says which it did.
+
+The last run (execution 53) returned `updated` for all three customers and all three sales
+orders with the same internal IDs the previous run had created — `3362`/`40629`,
+`3262`/`40529`, `3363`/`40530`. No duplicates. That is the proof that "add or edit" works for a
+transaction, not only for an entity.
+
+### `get` reaches more than one record
+
+Two things the `Record ID` field turned out to accept, both because `get` interpolates it into
+the URL raw:
+
+- **`eid:{externalId}`** — `GET /record/v1/customer/eid:n8n-cust-003` returns the record
+  (executions 47–53). Note that `encodeURIComponent` is applied on `upsert` but not here, which
+  is what leaves the colon intact.
+- **A query string** — with `Resource: Other`, `Record Type Name: inventoryItem` and Record ID
+  `?limit=20&q=isInactive%20IS%20false`, the node issues
+  `GET /record/v1/inventoryItem/?limit=20&q=...` and NetSuite answers with a **collection**:
+  `count`, `hasMore`, `links.next` and an `items[]` of `{id, links}` (execution 44). So a
+  crude list is already reachable today. It is not a substitute for the planned SuiteQL
+  module — the collection carries ids and nothing else, so every field still costs a request —
+  but it is how you find a valid internal ID without opening the UI.
+
+`customResource` is a plain string field, so it takes an expression. `Resource: Other` plus
+`customResource: {{ $json.type }}` turns one node into a probe across many record types in a
+single run; that is how the item hunt below was done.
+
+### Finding a usable item: the trap is `isInactive`
+
+A sales order line needs an item internal ID, and the first probe (`inventoryItem` 1–40,
+`nonInventorySaleItem` 1–20, execution 32) found exactly four records: `inventoryItem` 32, 33,
+40 and `nonInventorySaleItem` 15. Every one of them was rejected by the sales order with
+
+```
+item.items[0]: Error while accessing a resource.
+You have entered an Invalid Field Value 15 for the following field: item.
+```
+
+Reading the records back (execution 43) explained it: **all four have `isInactive: true`**. The
+demo account keeps its inactive items at low internal IDs and the live ones far above; the
+collection query above returned 160 active `inventoryItem`s starting at `848`. Of the ones
+tried, `362` (Plywood Sheet 4x8) and `848` work on a sales order and `260` (Barrow Dining
+Table) still does not — untested why, and not worth chasing, since the error is the same
+generic "Invalid Field Value" for any item the transaction will not take.
+
+The lesson for the node: `Invalid Field Value <id> for the following field: item` means the id
+is not *usable here*, not that it does not exist. Read the record before concluding anything.
+
+### Body shapes confirmed on a transaction
+
+```json
+{
+  "entity": { "id": "3362" },
+  "tranDate": "2026-09-06",
+  "memo": "Gamma reorder",
+  "item": { "items": [ { "item": { "id": "848" }, "quantity": 3, "rate": 80 } ] }
+}
+```
+
+`item.items[]` is the REST sublist shape and NetSuite parses it — its error messages address
+`item.items[0]` by path, which is how a bad line is located. `subsidiary` `36`
+("HEADQUARTERS - USD") holds for `customer`; the sales order takes its subsidiary from the
+customer and does not need one in the body.
+
+### Failure handling is deliberate
+
+Both upserts carry `onError: continueRegularOutput`, so a NetSuite rejection becomes a `failed`
+row in the log CSV rather than a dead run. A failed customer upsert cascades: the order body
+then renders `"entity": { "id": "undefined" }` and NetSuite answers
+`entity: Please enter a value for [entity]`. Both errors reach the log, which is what you want
+from a nightly job — the other rows still land.
+
+### Installing a workflow into a running n8n from outside
+
+`/rest` rejects requests from a CDP-driven tab, so the graph goes in the way a human pastes it:
+`document.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt }))` with the workflow
+JSON as `text/plain`. Two things to know:
+
+- the editor's paste handler is **debounced 1000 ms**, so wait before checking the canvas;
+- n8n's changelog and NPS **drawers swallow the event entirely** — and the keyboard shortcuts
+  with it. Click `.el-drawer__close-btn` first or the paste silently does nothing.
+
+On save n8n **strips every parameter whose value equals the node default** — `operation: 'csv'`,
+`authentication: 'oAuth2'`, `resource: 'customer'`, `jsonParameters: true`, `hoursInterval: 1`.
+Diffing the saved `workflow_entity.nodes` against the source JSON therefore shows differences
+that are not drift; compare against the defaults before believing a parameter was dropped.

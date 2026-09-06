@@ -1,0 +1,4 @@
+customerExternalId,companyName,email,subsidiary,orderExternalId,orderDate,itemId,quantity,rate,memo
+n8n-cust-003,N8N Demo Gamma SA,gamma@example.com,36,n8n-so-003,2026-09-06,848,3,80,Gamma reorder
+n8n-cust-004,N8N Demo Delta Oy,delta@example.com,36,n8n-so-004,2026-09-06,362,10,25,Delta plywood order
+n8n-cust-005,N8N Demo Epsilon BV,epsilon@example.com,36,n8n-so-005,2026-09-06,362,2,120,Epsilon first order
